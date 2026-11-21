@@ -1,0 +1,19 @@
+
+# Python virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Development tools
+.vscode/
+.pytest_cache/
+
+# Local environment variables
+.env
+
+# Generated experimental outputs
+results/
+  
