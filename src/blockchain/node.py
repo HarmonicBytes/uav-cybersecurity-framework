@@ -75,30 +75,98 @@ class GCSNode:
                 f"PREPARE broadcast failed: {error}"
             )
 
+
     async def broadcast_local_commit(self, message):
         """
-        Broadcast this GCS node's signed COMMIT vote
-        to the other registered validators.
+        Broadcast this validator's COMMIT vote.
+
+        Retry temporarily rejected COMMIT messages
+        when the destination has not yet reached
+        its local PREPARE quorum.
         """
-        try:
+
+        async def send_with_retry(destination_id):
+            max_attempts = 20
+            retry_delay = 0.05
+
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = await self.transport.send(
+                        destination_id,
+                        message,
+                    )
+
+                    status = response.get("status")
+                    result = response.get("result", {})
+                    reason = (
+                        result.get("reason", "")
+                        if isinstance(result, dict)
+                        else ""
+                    )
+
+                    if status == "pbft_processed":
+                        print(
+                            f"{self.node_id} -> "
+                            f"{destination_id}: "
+                            f"COMMIT accepted "
+                            f"(attempt {attempt})"
+                        )
+                        return True
+
+                    if reason not in (
+                        "Prepare quorum not reached",
+                        "No accepted primary proposal",
+                    ):
+                        print(
+                            f"{self.node_id} -> "
+                            f"{destination_id}: "
+                            f"COMMIT rejected: {response}"
+                        )
+                        return False
+
+                except (
+                    OSError,
+                    asyncio.TimeoutError,
+                    ConnectionError,
+                ) as error:
+                    if attempt == max_attempts:
+                        print(
+                            f"{self.node_id} -> "
+                            f"{destination_id}: "
+                            f"COMMIT delivery failed: {error}"
+                        )
+                        return False
+
+                if attempt < max_attempts:
+                    await asyncio.sleep(retry_delay)
+
             print(
-                f"{self.node_id}: Broadcasting COMMIT "
-                f"for sequence {message['sequence']}"
+                f"{self.node_id} -> "
+                f"{destination_id}: "
+                "COMMIT retry limit reached"
             )
+            return False
 
-            responses = await self.transport.broadcast(message)
+        destinations = [
+            node_id
+            for node_id in self.registry
+            if node_id != self.node_id
+        ]
 
-            for destination, response in responses.items():
-                print(
-                    f"{self.node_id} -> {destination}: "
-                    f"COMMIT {response.get('status')}"
-                )
+        results = await asyncio.gather(
+            *[
+                send_with_retry(destination_id)
+                for destination_id in destinations
+            ]
+        )
 
-        except Exception as error:
-            print(
-                f"{self.node_id}: "
-                f"COMMIT broadcast failed: {error}"
-            )
+        accepted = sum(results)
+
+        print(
+            f"{self.node_id}: COMMIT broadcast completed "
+            f"({accepted}/{len(destinations)} peers accepted)"
+        )
+
 
     async def handle_connection(self, reader, writer):
         peer = writer.get_extra_info("peername")
@@ -284,6 +352,9 @@ class GCSNode:
                                     "prepared": state.prepared,
                                     "committed": state.committed,
                                     "digest": state.digest,
+
+                                    # Internal PBFT phase timing measurements.
+                                    **self.replica.timing_metrics(state),
                                 }
                                 if state is not None
                                 else None

@@ -1,5 +1,6 @@
 
 import re
+import time
 from dataclasses import dataclass, field
 
 from authentication import verify_message
@@ -14,6 +15,11 @@ class RequestState:
     prepared: bool = False
     committed: bool = False
 
+    # Monotonic timestamps local to this GCS process.
+    proposal_received_ns: int | None = None
+    prepared_ns: int | None = None
+    committed_ns: int | None = None
+
 
 class PBFTReplica:
     """
@@ -24,6 +30,8 @@ class PBFTReplica:
 
     Network broadcasting and view changes are
     implemented separately.
+
+    Consensus timing uses the local monotonic clock.
     """
 
     def __init__(self, node_id, validator_ids):
@@ -110,7 +118,8 @@ class PBFTReplica:
                     )
             else:
                 self.requests[key] = RequestState(
-                    digest=pbft.digest
+                    digest=pbft.digest,
+                    proposal_received_ns=time.perf_counter_ns(),
                 )
 
             return self._status(key)
@@ -133,8 +142,12 @@ class PBFTReplica:
 
             state.prepare_voters.add(sender)
 
-            if len(state.prepare_voters) >= self.quorum:
+            if (
+                not state.prepared
+                and len(state.prepare_voters) >= self.quorum
+            ):
                 state.prepared = True
+                state.prepared_ns = time.perf_counter_ns()
 
             return self._status(key)
 
@@ -146,12 +159,55 @@ class PBFTReplica:
 
             state.commit_voters.add(sender)
 
-            if len(state.commit_voters) >= self.quorum:
+            if (
+                not state.committed
+                and len(state.commit_voters) >= self.quorum
+            ):
                 state.committed = True
+                state.committed_ns = time.perf_counter_ns()
 
             return self._status(key)
 
         return self._reject("Unsupported phase")
+
+    @staticmethod
+    def timing_metrics(state):
+        """
+        Return local timing measurements in milliseconds.
+
+        Timestamps belong to one GCS process only.
+        Never subtract timestamps from different processes.
+        """
+
+        def elapsed_ms(start_ns, end_ns):
+            if start_ns is None or end_ns is None:
+                return None
+
+            return round(
+                (end_ns - start_ns) / 1_000_000,
+                6,
+            )
+
+        return {
+            "proposal_received_ns": state.proposal_received_ns,
+            "prepared_ns": state.prepared_ns,
+            "committed_ns": state.committed_ns,
+
+            "prepare_latency_ms": elapsed_ms(
+                state.proposal_received_ns,
+                state.prepared_ns,
+            ),
+
+            "commit_latency_ms": elapsed_ms(
+                state.prepared_ns,
+                state.committed_ns,
+            ),
+
+            "consensus_latency_ms": elapsed_ms(
+                state.proposal_received_ns,
+                state.committed_ns,
+            ),
+        }
 
     @staticmethod
     def _reject(reason):

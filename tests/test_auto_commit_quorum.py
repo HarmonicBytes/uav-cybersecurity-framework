@@ -116,18 +116,36 @@ async def main():
             state = response["result"]
 
             print(
-                f"{node_id}: "
+                f"[DEBUG] {node_id}: "
                 f"PREPARE={state['prepare_votes']} "
                 f"COMMIT={state['commit_votes']} "
                 f"prepared={state['prepared']} "
                 f"committed={state['committed']}"
             )
 
+            # IMPORTANT:
+            # This block must remain INSIDE the for loop.
             if state["committed"]:
                 assert state["prepared"] is True
                 assert state["digest"] == digest
                 assert state["commit_votes"] >= 3
+
                 committed_count += 1
+
+                print(
+                    f"{node_id} timing: "
+                    f"PREPARE="
+                    f"{state['prepare_latency_ms']} ms | "
+                    f"COMMIT="
+                    f"{state['commit_latency_ms']} ms | "
+                    f"TOTAL="
+                    f"{state['consensus_latency_ms']} ms"
+                )
+
+        print(
+            f"[SUMMARY] Committed replicas: "
+            f"{committed_count}/{len(NODES)}"
+        )
 
         if committed_count == len(NODES):
             elapsed_ms = (
