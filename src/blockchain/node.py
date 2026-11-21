@@ -7,7 +7,13 @@ from authentication import load_registry, verify_message
 from replica import PBFTReplica
 from voting import PBFTVotingService
 from transport import PBFTTransport
+from pathlib import Path
 
+from ledger_genesis import TRUSTED_GENESIS_HASH
+from ledger_replication import (
+    ReplicaLedgerStore,
+    LedgerReplicationError,
+)
 
 class GCSNode:
     """
@@ -49,7 +55,22 @@ class GCSNode:
 
         # Preserve this validator's own signed COMMIT votes.
         # Key: (view, sequence)
-        self.local_commit_envelopes = {}
+        
+                # Separate persistent ledger for this GCS.
+        # The existing central ledger is not changed.
+        root = Path(__file__).resolve().parents[2]
+
+        self.replica_ledger = ReplicaLedgerStore(
+            node_id=node_id,
+            path=(
+                root
+                / "results"
+                / "replicas"
+                / node_id
+                / "ledger.json"
+            ),
+            trusted_genesis_hash=TRUSTED_GENESIS_HASH,
+        )
     async def broadcast_local_prepare(self, message):
         """
         Broadcast this GCS node's own PREPARE vote
@@ -382,6 +403,64 @@ class GCSNode:
                                 else None
                             ),
                         }
+                
+                elif message_type == "LEDGER_STATUS":
+                    # The request has already passed
+                    # Ed25519 authentication.
+                    result = self.replica_ledger.status()
+
+                    response = {
+                        "status": "ok",
+                        "node_id": self.node_id,
+                        "result": result,
+                    }
+
+                elif message_type == "LEDGER_APPEND":
+                    # Only the designated integration
+                    # primary can submit canonical blocks.
+                    if envelope["sender"] != "GCS_01":
+                        response = {
+                            "status": "rejected",
+                            "node_id": self.node_id,
+                            "reason": "Unauthorized ledger writer",
+                        }
+
+                    else:
+                        block_data = message.get("block")
+
+                        try:
+                            result = (
+                                self.replica_ledger.apply_block(
+                                    block_data
+                                )
+                            )
+
+                            response = {
+                                "status": "ledger_processed",
+                                "node_id": self.node_id,
+                                "result": result,
+                            }
+
+                            print(
+                                f"{self.node_id}: "
+                                f"Replicated block "
+                                f"{result['block_index']} "
+                                f"({result['status']})"
+                            )
+
+                        except (
+                            LedgerReplicationError,
+                            ValueError,
+                            KeyError,
+                            TypeError,
+                        ) as error:
+                            response = {
+                                "status": "rejected",
+                                "node_id": self.node_id,
+                                "reason": str(error),
+                            }
+
+
                 elif message_type == "SECURITY_ALERT":
                     response = {
                         "status": "authenticated",
