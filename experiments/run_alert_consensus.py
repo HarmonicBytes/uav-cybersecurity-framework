@@ -6,12 +6,13 @@ import sys
 import time
 from pathlib import Path
 
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src" / "blockchain"))
 
 from authentication import sign_message
 from protocol import PBFTMessage, calculate_digest
-
+from ledger_store import SecurityLedgerStore
 
 NODES = {
     "GCS_01": 5001,
@@ -202,6 +203,36 @@ async def run(event, timeout):
             observed_ms = (
                 time.perf_counter() - start
             ) * 1000
+
+            print("\n[3] Consensus completed")
+
+        if committed == len(NODES):
+            observed_ms = (
+                time.perf_counter() - start
+            ) * 1000
+
+            # Step 4: Persist the security alert
+            # after all four GCS nodes have committed.
+            store = SecurityLedgerStore()
+
+            ledger_result = store.append_committed_alert(
+                alert=event,
+                committed_digest=digest,
+                view=view,
+                sequence=sequence,
+                committed_validators=list(NODES.keys()),
+            )
+
+            print("\n[4] Security alert persisted")
+            print(
+                f"Block index: {ledger_result['block_index']}"
+            )
+            print(
+                f"Block hash: {ledger_result['block_hash']}"
+            )
+            print(
+                f"Chain valid: {ledger_result['chain_valid']}"
+            )
 
             print("\n[3] Consensus completed")
 
