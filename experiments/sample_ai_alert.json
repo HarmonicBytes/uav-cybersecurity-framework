@@ -1,0 +1,8 @@
+
+{
+  "uav_id": "UAV_001",
+  "event_type": "GPS_SPOOFING_ALERT",
+  "anomaly_score": 4.25,
+  "source": "synthetic_ai_test",
+  "detection_result": "ANOMALY"
+}
