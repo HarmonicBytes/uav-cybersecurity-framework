@@ -2,6 +2,7 @@
 import csv
 import math
 import statistics
+import argparse
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -92,7 +93,25 @@ def numeric_values(rows, column):
 
 
 def main():
-    with INPUT.open(
+    
+    parser = argparse.ArgumentParser(
+        description="Analyze UAV cybersecurity end-to-end latency"
+    )
+
+    parser.add_argument(
+        "--input",
+        default=str(INPUT),
+        help="Path to the benchmark CSV file",
+    )
+
+    args = parser.parse_args()
+
+    input_path = Path(args.input)
+
+    if not input_path.exists():
+        raise FileNotFoundError(input_path)
+
+    with input_path.open(
         newline="",
         encoding="utf-8-sig",
     ) as file:
