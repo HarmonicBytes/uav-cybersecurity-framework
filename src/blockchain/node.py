@@ -5,6 +5,8 @@ import json
 
 from authentication import load_registry, verify_message
 from replica import PBFTReplica
+from voting import PBFTVotingService
+from transport import PBFTTransport
 
 
 class GCSNode:
@@ -36,6 +38,67 @@ class GCSNode:
             node_id=node_id,
             validator_ids=list(self.registry.keys()),
         )
+        # Each GCS generates and signs its own PBFT votes.
+        self.voting = PBFTVotingService(node_id)
+
+        # Authenticated communication with other validators.
+        self.transport = PBFTTransport(node_id)
+
+        # Track ongoing background broadcasts.
+        self.background_tasks = set()
+
+    async def broadcast_local_prepare(self, message):
+        """
+        Broadcast this GCS node's own PREPARE vote
+        to the other three validators.
+        """
+
+        try:
+            print(
+                f"{self.node_id}: Broadcasting PREPARE "
+                f"for sequence {message['sequence']}"
+            )
+
+            responses = await self.transport.broadcast_prepare(
+                message
+            )
+
+            for destination, response in responses.items():
+                print(
+                    f"{self.node_id} -> {destination}: "
+                    f"{response.get('status')}"
+                )
+
+        except Exception as error:
+            print(
+                f"{self.node_id}: "
+                f"PREPARE broadcast failed: {error}"
+            )
+
+    async def broadcast_local_commit(self, message):
+        """
+        Broadcast this GCS node's signed COMMIT vote
+        to the other registered validators.
+        """
+        try:
+            print(
+                f"{self.node_id}: Broadcasting COMMIT "
+                f"for sequence {message['sequence']}"
+            )
+
+            responses = await self.transport.broadcast(message)
+
+            for destination, response in responses.items():
+                print(
+                    f"{self.node_id} -> {destination}: "
+                    f"COMMIT {response.get('status')}"
+                )
+
+        except Exception as error:
+            print(
+                f"{self.node_id}: "
+                f"COMMIT broadcast failed: {error}"
+            )
 
     async def handle_connection(self, reader, writer):
         peer = writer.get_extra_info("peername")
@@ -70,6 +133,102 @@ class GCSNode:
                     result = self.replica.process_message(
                         envelope
                     )
+                    # Generate one local PREPARE vote after accepting
+                    # a valid PRE-PREPARE proposal.
+                    if (
+                        result["accepted"]
+                        and message.get("phase") == "PRE_PREPARE"
+                    ):
+                        vote = self.voting.create_vote(
+                            phase="PREPARE",
+                            view=message["view"],
+                            sequence=message["sequence"],
+                            digest=message["digest"],
+                        )
+
+                        if vote["success"]:
+                            local_result = self.replica.process_message(
+                                vote["envelope"]
+                            )
+
+                            if not local_result["accepted"]:
+                                raise RuntimeError(
+                                    "Locally generated PREPARE was rejected"
+                                )
+
+                            print(
+                                f"{self.node_id}: "
+                                "Local signed PREPARE generated"
+                            )
+                            result = local_result
+
+                            # Broadcast in the background so the node
+                            # can respond without blocking on other GCS servers.
+                            task = asyncio.create_task(
+                                self.broadcast_local_prepare(
+                                    vote["envelope"]["message"]
+                                )
+                            )
+
+                            self.background_tasks.add(task)
+                            task.add_done_callback(
+                                self.background_tasks.discard
+                            )
+                    # Check whether this replica has reached
+                    # the local PBFT prepared condition.
+                    if result["accepted"]:
+                        view = message["view"]
+                        sequence = message["sequence"]
+                        digest = message["digest"]
+
+                        state = self.replica.requests.get(
+                            (view, sequence)
+                        )
+
+                        if (
+                            state is not None
+                            and state.prepared
+                            and state.digest == digest
+                        ):
+                            commit_vote = self.voting.create_vote(
+                                phase="COMMIT",
+                                view=view,
+                                sequence=sequence,
+                                digest=digest,
+                                prepared=state.prepared,
+                            )
+
+                            if commit_vote["success"]:
+
+                                local_commit_result = (
+                                    self.replica.process_message(
+                                        commit_vote["envelope"]
+                                    )
+                                )
+
+                                if not local_commit_result["accepted"]:
+                                    raise RuntimeError(
+                                        "Locally generated COMMIT "
+                                        "was rejected"
+                                    )
+
+                                result = local_commit_result
+
+                                print(
+                                    f"{self.node_id}: "
+                                    "Local signed COMMIT generated"
+                                )
+
+                                task = asyncio.create_task(
+                                    self.broadcast_local_commit(
+                                        commit_vote["envelope"]["message"]
+                                    )
+                                )
+
+                                self.background_tasks.add(task)
+                                task.add_done_callback(
+                                    self.background_tasks.discard
+                                )
 
                     response = {
                         "status": (
@@ -88,8 +247,49 @@ class GCSNode:
                         f"=> {response['status']}"
                     )
 
-                elif message_type == "SECURITY_ALERT":
+                elif message_type == "PBFT_STATUS":
+                    view = message.get("view")
+                    sequence = message.get("sequence")
 
+                    if (
+                        type(view) is not int
+                        or type(sequence) is not int
+                        or view != 0
+                        or sequence < 1
+                    ):
+                        response = {
+                            "status": "rejected",
+                            "node_id": self.node_id,
+                            "reason": "Invalid status request",
+                        }
+                    else:
+                        state = self.replica.requests.get(
+                            (view, sequence)
+                        )
+
+                        response = {
+                            "status": "ok",
+                            "node_id": self.node_id,
+                            "view": view,
+                            "sequence": sequence,
+                            "found": state is not None,
+                            "result": (
+                                {
+                                    "prepare_votes": len(
+                                        state.prepare_voters
+                                    ),
+                                    "commit_votes": len(
+                                        state.commit_voters
+                                    ),
+                                    "prepared": state.prepared,
+                                    "committed": state.committed,
+                                    "digest": state.digest,
+                                }
+                                if state is not None
+                                else None
+                            ),
+                        }
+                elif message_type == "SECURITY_ALERT":
                     response = {
                         "status": "authenticated",
                         "node_id": self.node_id,

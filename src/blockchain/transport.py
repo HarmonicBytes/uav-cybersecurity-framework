@@ -102,3 +102,51 @@ class PBFTTransport:
         )
 
         return dict(zip(destinations, responses))
+
+    async def broadcast_prepare(self, message):
+        """
+        Broadcast a PREPARE message with bounded retries.
+
+        A destination may temporarily reject PREPARE
+        if its PRE-PREPARE proposal has not arrived.
+        """
+
+        destinations = [
+            validator_id
+            for validator_id in self.registry
+            if validator_id != self.node_id
+        ]
+
+        async def send_with_retry(destination_id):
+            for attempt in range(5):
+                response = await self.send(
+                    destination_id,
+                    message,
+                )
+
+                if response.get("status") == "pbft_processed":
+                    return response
+
+                reason = response.get("result", {}).get(
+                    "reason",
+                    response.get("reason", ""),
+                )
+
+                if reason != "No accepted primary proposal":
+                    return response
+
+                await asyncio.sleep(0.1 * (attempt + 1))
+
+            return {
+                "status": "retry_exhausted",
+                "node_id": destination_id,
+            }
+
+        responses = await asyncio.gather(
+            *[
+                send_with_retry(destination)
+                for destination in destinations
+            ]
+        )
+
+        return dict(zip(destinations, responses))

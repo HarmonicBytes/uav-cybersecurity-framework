@@ -133,3 +133,37 @@ def test_duplicate_votes_not_counted_twice():
 
     assert result["prepare_votes"] == 1
     assert result["prepared"] is False
+
+def test_prepare_before_preprepare_is_rejected():
+    replica = PBFTReplica(
+        node_id="GCS_02",
+        validator_ids=VALIDATORS,
+    )
+
+    digest = calculate_digest({
+        "event": "GPS_SPOOFING_ALERT"
+    })
+
+    # A PREPARE arrives before the primary proposal.
+    early_vote = create_signed_vote(
+        "GCS_03",
+        "PREPARE",
+        digest,
+    )
+
+    result = replica.process_message(early_vote)
+
+    assert result["accepted"] is False
+    assert result["reason"] == "No accepted primary proposal"
+
+    # The legitimate primary proposal arrives later.
+    proposal = create_signed_vote(
+        "GCS_01",
+        "PRE_PREPARE",
+        digest,
+    )
+
+    result = replica.process_message(proposal)
+
+    assert result["accepted"] is True
+    assert result["prepare_votes"] == 0
