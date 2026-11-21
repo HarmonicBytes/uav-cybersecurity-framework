@@ -249,6 +249,7 @@ def test_untrusted_genesis_rejected(
         replica.apply_block(canonical_blocks[0])
 
 
+
 def test_uncertified_block_rejected(
     tmp_path, canonical_blocks
 ):
@@ -282,3 +283,160 @@ def test_uncertified_block_rejected(
         match="Missing COMMIT certificate",
     ):
         replica.apply_block(uncertified)
+
+
+def test_cached_status_matches_full_audit(
+    tmp_path, canonical_blocks
+):
+    replica = make_replica(
+        tmp_path,
+        "GCS_01",
+        canonical_blocks[0]["block_hash"],
+    )
+
+    for block in canonical_blocks:
+        replica.apply_block(block)
+
+    # First status performs complete verification.
+    initial = replica.status()
+
+    # Second status should use verified cached state.
+    cached = replica.status()
+
+    # Explicit full audit must produce identical results.
+    audited = replica.status(full_audit=True)
+
+    assert initial == cached == audited
+    assert audited["valid"] is True
+    assert audited["blocks"] == 2
+
+
+def test_cache_invalidated_after_external_tampering(
+    tmp_path, canonical_blocks
+):
+    replica = make_replica(
+        tmp_path,
+        "GCS_01",
+        canonical_blocks[0]["block_hash"],
+    )
+
+    for block in canonical_blocks:
+        replica.apply_block(block)
+
+    # Populate the verified-state cache.
+    assert replica.status()["valid"] is True
+
+    path = replica.store.path
+
+    data = json.loads(
+        path.read_text(encoding="utf-8")
+    )
+
+    # Modify an existing security alert on disk.
+    data[1]["event"]["alert"]["anomaly_score"] = -1
+
+    path.write_text(
+        json.dumps(data),
+        encoding="utf-8",
+    )
+
+    # The cached valid result must not be returned.
+    with pytest.raises(ValueError):
+        replica.status()
+
+
+def test_restart_requires_full_verification(
+    tmp_path, canonical_blocks
+):
+    genesis_hash = canonical_blocks[0]["block_hash"]
+
+    original = make_replica(
+        tmp_path,
+        "GCS_01",
+        genesis_hash,
+    )
+
+    for block in canonical_blocks:
+        original.apply_block(block)
+
+    assert original.status()["valid"] is True
+
+    # Simulate process restart by creating a new
+    # instance pointing to the same persisted ledger.
+    restarted = make_replica(
+        tmp_path,
+        "GCS_01",
+        genesis_hash,
+    )
+
+    assert restarted._cached_status is None
+    assert restarted._verified_fingerprint is None
+
+    # The new instance must verify stored history.
+    result = restarted.status(full_audit=True)
+
+    assert result["valid"] is True
+    assert result["blocks"] == 2
+    assert result["latest_index"] == 1
+    
+    replica = make_replica(
+        tmp_path,
+        "GCS_01",
+        canonical_blocks[0]["block_hash"],
+    )
+
+    replica.apply_block(canonical_blocks[0])
+
+    uncertified = copy.deepcopy(
+        canonical_blocks[1]
+    )
+
+    uncertified["event"]["consensus"].pop(
+        "commit_certificate"
+    )
+
+    block = Block(
+        index=uncertified["index"],
+        timestamp=uncertified["timestamp"],
+        previous_hash=uncertified["previous_hash"],
+        event=uncertified["event"],
+    )
+
+    uncertified["block_hash"] = block.calculate_hash()
+
+    with pytest.raises(
+        LedgerReplicationError,
+        match="Missing COMMIT certificate",
+    ):
+        replica.apply_block(uncertified)
+
+def test_cache_invalidated_after_block_append(
+    tmp_path, canonical_blocks
+):
+    replica = make_replica(
+        tmp_path,
+        "GCS_01",
+        canonical_blocks[0]["block_hash"],
+    )
+
+    replica.apply_block(canonical_blocks[0])
+
+    # Populate the cache for the genesis-only chain.
+    first_status = replica.status()
+    assert first_status["blocks"] == 1
+    assert replica._cached_status is not None
+
+    # Appending a certified block must invalidate it.
+    result = replica.apply_block(canonical_blocks[1])
+
+    assert result["status"] == "appended"
+    assert replica._cached_status is None
+    assert replica._verified_fingerprint is None
+
+    # Status now validates the updated chain.
+    updated = replica.status()
+
+    assert updated["valid"] is True
+    assert updated["blocks"] == 2
+    assert updated["latest_index"] == 1
+    assert updated == replica.status(full_audit=True)

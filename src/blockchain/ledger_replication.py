@@ -1,7 +1,9 @@
 
 import copy
+import hashlib
+import threading
+from authentication import REGISTRY_PATH
 from pathlib import Path
-
 from block import Block
 from commit_certificate import verify_commit_certificate
 from ledger_store import SecurityLedgerStore
@@ -58,7 +60,11 @@ class ReplicaLedgerStore:
             )
 
         self.store = SecurityLedgerStore(path=path)
-
+        # Trusted only within this running process.
+        # Nothing is loaded from an unauthenticated cache file.
+        self._lock = threading.RLock()
+        self._verified_fingerprint = None
+        self._cached_status = None
     @staticmethod
     def _block_from_dict(data):
         if not isinstance(data, dict):
@@ -217,7 +223,52 @@ class ReplicaLedgerStore:
 
         return (view, sequence)
 
-    def apply_block(self, block_data):
+    def _content_fingerprint(self):
+        """
+        Bind previously verified state to the actual
+        ledger bytes and current validator registry.
+
+        Hashing the file is cheaper than verifying
+        every historical Ed25519 certificate again.
+        """
+        ledger_path = self.store.path
+
+        ledger_bytes = (
+            ledger_path.read_bytes()
+            if ledger_path.exists()
+            else b""
+        )
+
+        registry_bytes = REGISTRY_PATH.read_bytes()
+
+        return (
+            hashlib.sha256(ledger_bytes).digest(),
+            hashlib.sha256(registry_bytes).digest(),
+            ledger_path.exists(),
+        )
+
+    def _cache_verified_state(self, blockchain, verified_fingerprint):
+        """
+        Called only after successful integrity and
+        certificate verification.
+        """
+        self._verified_fingerprint = verified_fingerprint
+
+        self._cached_status = {
+            "node_id": self.node_id,
+            "valid": True,
+            "blocks": len(blockchain.chain),
+            "latest_index": (
+                blockchain.chain[-1].index
+                if blockchain.chain else None
+            ),
+            "latest_hash": (
+                blockchain.chain[-1].block_hash
+                if blockchain.chain else None
+            ),
+        }
+
+    def _apply_block_locked(self, block_data):
         """
         Apply one canonical block after validation.
 
@@ -295,25 +346,67 @@ class ReplicaLedgerStore:
             "block_hash": block.block_hash,
         }
 
-    def status(self):
-        blockchain = self.store.load()
 
-        if blockchain.chain:
-            self._verify_genesis(blockchain.chain[0])
+    def apply_block(self, block_data):
+        """
+        Serialize append operations with status checks
+        within this ReplicaLedgerStore instance.
+        """
+        with self._lock:
+            try:
+                return self._apply_block_locked(block_data)
+            finally:
+                # Any append attempt can affect the
+                # previously verified in-memory state.
+                self._verified_fingerprint = None
+                self._cached_status = None
 
-        for block in blockchain.chain[1:]:
-            self._verify_certified_event(block)
+    def status(self, full_audit=False):
+        """
+        Return verified ledger status.
 
-        return {
-            "node_id": self.node_id,
-            "valid": blockchain.verify_chain(),
-            "blocks": len(blockchain.chain),
-            "latest_index": (
-                blockchain.chain[-1].index
-                if blockchain.chain else None
-            ),
-            "latest_hash": (
-                blockchain.chain[-1].block_hash
-                if blockchain.chain else None
-            ),
-        }
+        Reuse verified state only if both the ledger
+        content and validator registry are unchanged.
+
+        full_audit=True always verifies the complete
+        chain and every historical COMMIT certificate.
+        """
+        with self._lock:
+            before = self._content_fingerprint()
+
+            if (
+                not full_audit
+                and self._cached_status is not None
+                and before == self._verified_fingerprint
+            ):
+                return dict(self._cached_status)
+
+            blockchain = self.store.load()
+
+            if blockchain.chain:
+                self._verify_genesis(
+                    blockchain.chain[0]
+                )
+
+            for block in blockchain.chain[1:]:
+                self._verify_certified_event(block)
+
+            if not blockchain.verify_chain():
+                raise LedgerReplicationError(
+                    "Ledger integrity verification failed"
+                )
+
+            after = self._content_fingerprint()
+
+            if before != after:
+                self._verified_fingerprint = None
+                self._cached_status = None
+                raise LedgerReplicationError(
+                    "Ledger or validator registry changed "
+                    "during verification"
+                )
+
+            self._cache_verified_state(blockchain, verified_fingerprint=after)
+
+            return dict(self._cached_status)
+
