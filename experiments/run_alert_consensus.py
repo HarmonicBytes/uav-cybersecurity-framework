@@ -75,14 +75,21 @@ async def replicate_certified_alert(
         "GCS_01",
         {"type": "LEDGER_STATUS"},
     )
-
+    initial_status_started = time.perf_counter()
     responses = await asyncio.gather(
         *[
             send(port, status_envelope)
             for port in NODES.values()
         ]
     )
+    initial_status_ms = (
+        time.perf_counter() - initial_status_started
+    ) * 1000
 
+    print(
+        f"[PROFILE] Initial ledger status: "
+        f"{initial_status_ms:.4f} ms"
+    )
     states = []
 
     for node_id, response in zip(NODES, responses):
@@ -178,13 +185,18 @@ async def replicate_certified_alert(
             "block": canonical_block,
         },
     )
-
+    append_started = time.perf_counter()
     responses = await asyncio.gather(
         *[
             send(port, append_envelope)
             for port in NODES.values()
         ]
     )
+
+    append_ms = (
+        time.perf_counter() - append_started
+    ) * 1000
+    print(f"[PROFILE] Certified block append: {append_ms:.4f} ms")
 
     for node_id, response in zip(NODES, responses):
         if (
@@ -214,12 +226,18 @@ async def replicate_certified_alert(
 
     # Independently query the persisted states
     # after all four acknowledgments.
+    final_status_started = time.perf_counter()
     responses = await asyncio.gather(
         *[
             send(port, status_envelope)
             for port in NODES.values()
         ]
     )
+
+    final_status_ms = (
+        time.perf_counter() - final_status_started
+    ) * 1000
+    print(f"[PROFILE] Final ledger status: {final_status_ms:.4f} ms")
 
     for node_id, response in zip(NODES, responses):
         if (
@@ -242,6 +260,12 @@ async def replicate_certified_alert(
                 f"{node_id}: replicated ledger mismatch"
             )
 
+    profiled_ms = initial_status_ms + append_ms + final_status_ms
+    print("\n[PROFILE] Distributed replication breakdown")
+    print(f"Initial status: {initial_status_ms:.4f} ms")
+    print(f"Block append: {append_ms:.4f} ms")
+    print(f"Final status: {final_status_ms:.4f} ms")
+    print(f"Network-stage subtotal: {profiled_ms:.4f} ms")
     print("\nSUCCESS: FOUR MATCHING CERTIFIED GCS LEDGERS")
 
     return {

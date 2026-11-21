@@ -2,7 +2,8 @@
 import base64
 import json
 from pathlib import Path
-
+from copy import deepcopy
+from functools import lru_cache
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -15,9 +16,38 @@ REGISTRY_PATH = ROOT / "config" / "validators.json"
 KEYS_DIR = ROOT / "config" / "keys"
 
 
-def load_registry():
+
+@lru_cache(maxsize=8)
+def _load_registry_cached(file_version):
+    """
+    Cache a registry snapshot for a specific
+    filesystem version of validators.json.
+    """
     with open(REGISTRY_PATH, "r", encoding="utf-8") as file:
         return json.load(file)
+
+
+def load_registry():
+    """
+    Reuse the registry while its filesystem metadata
+    remains unchanged.
+
+    A modified registry receives a different cache key.
+    Return a defensive copy so callers cannot modify
+    the cached registry accidentally.
+    """
+    stat = REGISTRY_PATH.stat()
+
+    file_version = (
+        stat.st_mtime_ns,
+        stat.st_ctime_ns,
+        stat.st_size,
+        stat.st_ino,
+    )
+
+    return deepcopy(
+        _load_registry_cached(file_version)
+    )
 
 
 def load_private_key(validator_id):
