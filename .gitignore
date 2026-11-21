@@ -17,3 +17,5 @@ __pycache__/
 # Generated experimental outputs
 results/
   
+# Local validator private keys - never commit
+config/keys/

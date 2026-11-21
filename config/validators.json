@@ -1,0 +1,22 @@
+{
+    "GCS_01": {
+        "host": "127.0.0.1",
+        "port": 5001,
+        "public_key": "zvWFbeQwblGqal8jrp4ADx07Awx27dH64V3vkl5BiNI="
+    },
+    "GCS_02": {
+        "host": "127.0.0.1",
+        "port": 5002,
+        "public_key": "ceP2LoU9s1Cq6Ja6FXmQdO3h4oGjM0ywT3CbFxp4ZQM="
+    },
+    "GCS_03": {
+        "host": "127.0.0.1",
+        "port": 5003,
+        "public_key": "CE+b0s9wp1vpi4dButQQnqe8M+7QlccS+YSVQ8qWTcc="
+    },
+    "GCS_04": {
+        "host": "127.0.0.1",
+        "port": 5004,
+        "public_key": "DnCLmf12TxxOF/XrKRGUs0GkglW96BvmNwfDX+0MjUw="
+    }
+}
