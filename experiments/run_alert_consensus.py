@@ -6,16 +6,16 @@ import sys
 import time
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src" / "blockchain"))
 sys.path.insert(0, str(ROOT / "src" / "security"))
 
-from authentication import sign_message
-from protocol import PBFTMessage, calculate_digest
-from ledger_store import SecurityLedgerStore
-from response_engine import DefensiveResponseEngine
+from block import Block
 from commit_certificate import verify_commit_certificate
+from response_engine import DefensiveResponseEngine
+from ledger_store import SecurityLedgerStore
+from protocol import PBFTMessage, calculate_digest
+from authentication import sign_message
 
 NODES = {
     "GCS_01": 5001,
@@ -52,6 +52,203 @@ async def send(port, envelope):
     finally:
         writer.close()
         await writer.wait_closed()
+
+
+async def replicate_certified_alert(
+    event,
+    digest,
+    view,
+    sequence,
+    certificate,
+):
+    """
+    Extend the shared GCS ledger with one canonical
+    block containing real PBFT COMMIT evidence.
+
+    All four GCS nodes must already share the
+    same nonempty, certified ledger history.
+    """
+
+    print("\n[4A] Checking distributed GCS ledger state")
+
+    status_envelope = sign_message(
+        "GCS_01",
+        {"type": "LEDGER_STATUS"},
+    )
+
+    responses = await asyncio.gather(
+        *[
+            send(port, status_envelope)
+            for port in NODES.values()
+        ]
+    )
+
+    states = []
+
+    for node_id, response in zip(NODES, responses):
+        if (
+            response.get("status") != "ok"
+            or response.get("node_id") != node_id
+        ):
+            raise RuntimeError(
+                f"{node_id}: invalid ledger status: {response}"
+            )
+
+        state = response["result"]
+
+        if (
+            state.get("valid") is not True
+            or type(state.get("blocks")) is not int
+            or state["blocks"] < 1
+            or state.get("latest_index") != state["blocks"] - 1
+            or not isinstance(state.get("latest_hash"), str)
+        ):
+            raise RuntimeError(
+                f"{node_id}: invalid ledger state: {state}"
+            )
+
+        states.append(state)
+
+        print(
+            f"{node_id}: blocks={state['blocks']} "
+            f"hash={state['latest_hash'][:16]}..."
+        )
+
+    # Reject inconsistent histories rather than
+    # attempting to overwrite or silently repair them.
+    histories = {
+        (state["blocks"], state["latest_hash"])
+        for state in states
+    }
+
+    if len(histories) != 1:
+        raise RuntimeError(
+            "GCS ledgers are not synchronized. "
+            "Replication aborted."
+        )
+
+    current = states[0]
+
+    # Construct one canonical block extending
+    # the existing shared GCS history.
+    record = {
+        "type": "COMMITTED_SECURITY_ALERT",
+        "alert": event,
+        "alert_digest": digest,
+        "consensus": {
+            "protocol": "PBFT_PROTOTYPE",
+            "view": view,
+            "sequence": sequence,
+            "committed_validators": list(NODES.keys()),
+            "commitment_source": (
+                "integration_client_observation"
+            ),
+            "commit_certificate": certificate,
+            "certificate_verified": True,
+        },
+    }
+
+    block = Block(
+        index=current["blocks"],
+        timestamp=time.time(),
+        previous_hash=current["latest_hash"],
+        event=record,
+    )
+
+    block.seal()
+
+    canonical_block = {
+        "index": block.index,
+        "timestamp": block.timestamp,
+        "previous_hash": block.previous_hash,
+        "event": block.event,
+        "validator_signatures": [],
+        "block_hash": block.block_hash,
+    }
+
+    print(
+        f"\n[4B] Replicating certified block {block.index}"
+    )
+    print(f"Canonical hash: {block.block_hash}")
+
+    append_envelope = sign_message(
+        "GCS_01",
+        {
+            "type": "LEDGER_APPEND",
+            "block": canonical_block,
+        },
+    )
+
+    responses = await asyncio.gather(
+        *[
+            send(port, append_envelope)
+            for port in NODES.values()
+        ]
+    )
+
+    for node_id, response in zip(NODES, responses):
+        if (
+            response.get("status") != "ledger_processed"
+            or response.get("node_id") != node_id
+        ):
+            raise RuntimeError(
+                f"{node_id}: replication failed: {response}"
+            )
+
+        result = response["result"]
+
+        if (
+            result.get("block_index") != block.index
+            or result.get("block_hash") != block.block_hash
+            or result.get("status")
+            not in ("appended", "already_present")
+        ):
+            raise RuntimeError(
+                f"{node_id}: block acknowledgment mismatch"
+            )
+
+        print(
+            f"{node_id}: {result['status']} "
+            f"block={result['block_index']}"
+        )
+
+    # Independently query the persisted states
+    # after all four acknowledgments.
+    responses = await asyncio.gather(
+        *[
+            send(port, status_envelope)
+            for port in NODES.values()
+        ]
+    )
+
+    for node_id, response in zip(NODES, responses):
+        if (
+            response.get("status") != "ok"
+            or response.get("node_id") != node_id
+        ):
+            raise RuntimeError(
+                f"{node_id}: final status failed"
+            )
+
+        state = response["result"]
+
+        if (
+            state.get("valid") is not True
+            or state.get("blocks") != block.index + 1
+            or state.get("latest_index") != block.index
+            or state.get("latest_hash") != block.block_hash
+        ):
+            raise RuntimeError(
+                f"{node_id}: replicated ledger mismatch"
+            )
+
+    print("\nSUCCESS: FOUR MATCHING CERTIFIED GCS LEDGERS")
+
+    return {
+        "replicated_validators": len(NODES),
+        "replicated_block_index": block.index,
+        "replicated_block_hash": block.block_hash,
+    }
 
 
 async def run(event, timeout):
@@ -338,6 +535,35 @@ async def run(event, timeout):
             )
 
             # ===================================================
+            # PHASE 4A: DISTRIBUTED CERTIFIED REPLICATION
+            # ===================================================
+
+            replication_started = time.perf_counter()
+
+            replication_result = await replicate_certified_alert(
+                event=event,
+                digest=digest,
+                view=view,
+                sequence=sequence,
+                certificate=certificate,
+            )
+
+            replication_finished = time.perf_counter()
+
+            replication_ms = (
+                replication_finished - replication_started
+            ) * 1000
+
+            print(
+                "Distributed replication duration: "
+                f"{replication_ms:.4f} ms"
+            )
+
+            # Measure defensive response separately,
+            # excluding distributed replication.
+            response_started = time.perf_counter()
+
+            # ===================================================
             # PHASE 5: SIMULATED DEFENSIVE RESPONSE
             # ===================================================
 
@@ -398,7 +624,7 @@ async def run(event, timeout):
 
             response_ms = (
                 response_finished
-                - ledger_finished
+                - response_started
             ) * 1000
 
             alert_to_response_ms = (
@@ -417,6 +643,10 @@ async def run(event, timeout):
             print(
                 f"Ledger persistence: "
                 f"{ledger_ms:.4f} ms"
+            )
+            print(
+                f"Distributed replication: "
+                f"{replication_ms:.4f} ms"
             )
             print(
                 f"Response processing: "
@@ -481,6 +711,18 @@ async def run(event, timeout):
                     alert_to_response_ms, 6
                 ),
 
+                "replication_ms": round(
+                    replication_ms, 6
+                ),
+                "replicated_validators": (
+                    replication_result["replicated_validators"]
+                ),
+                "replicated_block_index": (
+                    replication_result["replicated_block_index"]
+                ),
+                "replicated_block_hash": (
+                    replication_result["replicated_block_hash"]
+                ),
                 "replica_consensus_ms": timings,
             }
 

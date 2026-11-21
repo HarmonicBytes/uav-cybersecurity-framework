@@ -55,8 +55,9 @@ class GCSNode:
 
         # Preserve this validator's own signed COMMIT votes.
         # Key: (view, sequence)
+        self.local_commit_envelopes = {}
         
-                # Separate persistent ledger for this GCS.
+        # Separate persistent ledger for this GCS.
         # The existing central ledger is not changed.
         root = Path(__file__).resolve().parents[2]
 
