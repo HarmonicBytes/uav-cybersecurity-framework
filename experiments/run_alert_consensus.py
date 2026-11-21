@@ -9,10 +9,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src" / "blockchain"))
+sys.path.insert(0, str(ROOT / "src" / "security"))
 
 from authentication import sign_message
 from protocol import PBFTMessage, calculate_digest
 from ledger_store import SecurityLedgerStore
+from response_engine import DefensiveResponseEngine
 
 NODES = {
     "GCS_01": 5001,
@@ -221,6 +223,40 @@ async def run(event, timeout):
                 view=view,
                 sequence=sequence,
                 committed_validators=list(NODES.keys()),
+            )
+
+            # Step 5: Evaluate simulated defensive actions
+            # only after consensus and ledger persistence.
+            response_engine = DefensiveResponseEngine(
+                ledger_store=store
+            )
+
+            response_result = (
+                response_engine.process_committed_alert(
+                    block_index=ledger_result["block_index"],
+                    expected_digest=digest,
+                    view=view,
+                    sequence=sequence,
+                )
+            )
+
+            print("\n[5] Simulated defensive response")
+            print(
+                f"Status: {response_result['status']}"
+            )
+            print(
+                f"Severity: {response_result['severity']}"
+            )
+
+            for action in response_result["actions"]:
+                print(
+                    f"Action: {action['action']} "
+                    f"({action['mode']})"
+                )
+
+            print(
+                "Response processing duration: "
+                f"{response_result['response_latency_ms']:.4f} ms"
             )
 
             print("\n[4] Security alert persisted")
