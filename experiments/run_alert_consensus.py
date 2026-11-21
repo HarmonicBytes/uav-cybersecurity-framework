@@ -16,6 +16,7 @@ from protocol import PBFTMessage, calculate_digest
 from ledger_store import SecurityLedgerStore
 from response_engine import DefensiveResponseEngine
 
+
 NODES = {
     "GCS_01": 5001,
     "GCS_02": 5002,
@@ -57,19 +58,31 @@ async def run(event, timeout):
     if not isinstance(event, dict):
         raise ValueError("Alert must be a JSON object")
 
-    for required in ("uav_id", "event_type", "anomaly_score"):
+    for required in (
+        "uav_id",
+        "event_type",
+        "anomaly_score",
+    ):
         if required not in event:
             raise ValueError(
                 f"Missing alert field: {required}"
             )
 
-    # A new consensus instance for each execution.
+    if timeout <= 0:
+        raise ValueError(
+            "Timeout must be greater than zero"
+        )
+
+    # Create a new consensus instance.
     sequence = time.time_ns() // 1000
     view = 0
     digest = calculate_digest(event)
 
     print("=" * 60)
-    print("UAV SECURITY ALERT -> AUTHENTICATION -> PBFT")
+    print(
+        "UAV SECURITY ALERT -> "
+        "AUTHENTICATION -> PBFT"
+    )
     print("=" * 60)
     print(f"UAV: {event['uav_id']}")
     print(f"Threat: {event['event_type']}")
@@ -77,9 +90,13 @@ async def run(event, timeout):
     print(f"Event digest: {digest}")
     print(f"Sequence: {sequence}")
 
+    # Begin client-observed workflow measurement.
     start = time.perf_counter()
 
-    # Phase 1: distribute an authenticated security alert.
+    # ===================================================
+    # PHASE 1: AUTHENTICATED SECURITY ALERT
+    # ===================================================
+
     security_message = {
         "type": "SECURITY_ALERT",
         "sequence": sequence,
@@ -92,7 +109,9 @@ async def run(event, timeout):
         security_message,
     )
 
-    print("\n[1] Sending authenticated security alert")
+    print(
+        "\n[1] Sending authenticated security alert"
+    )
 
     results = await asyncio.gather(
         *[
@@ -113,7 +132,13 @@ async def run(event, timeout):
 
         print(f"{node_id}: authenticated")
 
-    # Phase 2: submit the digest for PBFT consensus.
+    # Authentication phase ends here.
+    authentication_finished = time.perf_counter()
+
+    # ===================================================
+    # PHASE 2: AUTONOMOUS PBFT CONSENSUS
+    # ===================================================
+
     proposal = PBFTMessage(
         phase="PRE_PREPARE",
         view=view,
@@ -127,7 +152,9 @@ async def run(event, timeout):
         proposal,
     )
 
-    print("\n[2] Starting autonomous PBFT consensus")
+    print(
+        "\n[2] Starting autonomous PBFT consensus"
+    )
 
     results = await asyncio.gather(
         *[
@@ -145,7 +172,10 @@ async def run(event, timeout):
 
         print(f"{node_id}: proposal accepted")
 
-    # Phase 3: query independent GCS replica states.
+    # ===================================================
+    # PHASE 3: VERIFY REPLICA COMMITMENT
+    # ===================================================
+
     status_envelope = sign_message(
         "GCS_01",
         {
@@ -197,24 +227,43 @@ async def run(event, timeout):
 
                 committed += 1
 
-                latency = state.get("consensus_latency_ms")
+                latency = state.get(
+                    "consensus_latency_ms"
+                )
+
                 if latency is not None:
                     timings[node_id] = latency
 
+        # ===================================================
+        # ALL FOUR VALIDATORS HAVE COMMITTED
+        # ===================================================
+
         if committed == len(NODES):
+            consensus_finished = time.perf_counter()
+
             observed_ms = (
-                time.perf_counter() - start
+                consensus_finished - start
             ) * 1000
 
             print("\n[3] Consensus completed")
 
-        if committed == len(NODES):
-            observed_ms = (
-                time.perf_counter() - start
-            ) * 1000
+            for node_id in NODES:
+                latency = timings.get(node_id)
 
-            # Step 4: Persist the security alert
-            # after all four GCS nodes have committed.
+                if latency is not None:
+                    print(
+                        f"{node_id}: COMMITTED | "
+                        f"{latency:.4f} ms local consensus"
+                    )
+                else:
+                    print(
+                        f"{node_id}: COMMITTED"
+                    )
+
+            # ===================================================
+            # PHASE 4: PERSIST COMMITTED SECURITY ALERT
+            # ===================================================
+
             store = SecurityLedgerStore()
 
             ledger_result = store.append_committed_alert(
@@ -225,8 +274,26 @@ async def run(event, timeout):
                 committed_validators=list(NODES.keys()),
             )
 
-            # Step 5: Evaluate simulated defensive actions
-            # only after consensus and ledger persistence.
+            ledger_finished = time.perf_counter()
+
+            print("\n[4] Security alert persisted")
+            print(
+                f"Block index: "
+                f"{ledger_result['block_index']}"
+            )
+            print(
+                f"Block hash: "
+                f"{ledger_result['block_hash']}"
+            )
+            print(
+                f"Chain valid: "
+                f"{ledger_result['chain_valid']}"
+            )
+
+            # ===================================================
+            # PHASE 5: SIMULATED DEFENSIVE RESPONSE
+            # ===================================================
+
             response_engine = DefensiveResponseEngine(
                 ledger_store=store
             )
@@ -240,7 +307,11 @@ async def run(event, timeout):
                 )
             )
 
-            print("\n[5] Simulated defensive response")
+            response_finished = time.perf_counter()
+
+            print(
+                "\n[5] Simulated defensive response"
+            )
             print(
                 f"Status: {response_result['status']}"
             )
@@ -259,44 +330,115 @@ async def run(event, timeout):
                 f"{response_result['response_latency_ms']:.4f} ms"
             )
 
-            print("\n[4] Security alert persisted")
+            # ===================================================
+            # WORKFLOW TIMING SUMMARY
+            # ===================================================
+
+            authentication_ms = (
+                authentication_finished - start
+            ) * 1000
+
+            consensus_stage_ms = (
+                consensus_finished
+                - authentication_finished
+            ) * 1000
+
+            ledger_ms = (
+                ledger_finished
+                - consensus_finished
+            ) * 1000
+
+            response_ms = (
+                response_finished
+                - ledger_finished
+            ) * 1000
+
+            alert_to_response_ms = (
+                response_finished - start
+            ) * 1000
+
+            print("\n[6] Workflow timing breakdown")
             print(
-                f"Block index: {ledger_result['block_index']}"
+                f"Authentication: "
+                f"{authentication_ms:.4f} ms"
             )
             print(
-                f"Block hash: {ledger_result['block_hash']}"
+                f"PBFT consensus stage: "
+                f"{consensus_stage_ms:.4f} ms"
             )
             print(
-                f"Chain valid: {ledger_result['chain_valid']}"
+                f"Ledger persistence: "
+                f"{ledger_ms:.4f} ms"
             )
-
-            print("\n[3] Consensus completed")
-
-            for node_id in NODES:
-                latency = timings.get(node_id)
-
-                if latency is not None:
-                    print(
-                        f"{node_id}: COMMITTED | "
-                        f"{latency:.4f} ms local consensus"
-                    )
-                else:
-                    print(f"{node_id}: COMMITTED")
+            print(
+                f"Response processing: "
+                f"{response_ms:.4f} ms"
+            )
+            print(
+                f"Alert-to-response: "
+                f"{alert_to_response_ms:.4f} ms"
+            )
 
             print("\n" + "=" * 60)
-            print("SUCCESS: SECURITY ALERT CONSENSUS")
-            print(f"Committed replicas: {committed}/4")
-            print(f"Committed digest: {digest}")
             print(
-                "Client-observed workflow duration: "
-                f"{observed_ms:.3f} ms"
+                "SUCCESS: SECURITY ALERT CONSENSUS"
+            )
+            print(
+                f"Committed replicas: {committed}/4"
+            )
+            print(
+                f"Committed digest: {digest}"
+            )
+            print(
+                "Client-observed alert-to-consensus "
+                f"duration: {observed_ms:.3f} ms"
             )
             print("=" * 60)
-            return
+
+            # Return measurements to the benchmark.
+            return {
+                "status": "SUCCESS",
+                "sequence": sequence,
+                "alert_digest": digest,
+                "committed_validators": committed,
+                "block_index": (
+                    ledger_result["block_index"]
+                ),
+                "block_hash": (
+                    ledger_result["block_hash"]
+                ),
+                "response_status": (
+                    response_result["status"]
+                ),
+                "response_severity": (
+                    response_result["severity"]
+                ),
+                "response_actions": len(
+                    response_result["actions"]
+                ),
+
+                "authentication_ms": round(
+                    authentication_ms, 6
+                ),
+                "consensus_stage_ms": round(
+                    consensus_stage_ms, 6
+                ),
+                "ledger_ms": round(
+                    ledger_ms, 6
+                ),
+                "response_ms": round(
+                    response_ms, 6
+                ),
+                "alert_to_response_ms": round(
+                    alert_to_response_ms, 6
+                ),
+
+                "replica_consensus_ms": timings,
+            }
 
         if loop.time() >= deadline:
             raise TimeoutError(
-                f"PBFT consensus incomplete: "
+                "PBFT consensus incomplete: "
                 f"{committed}/4 committed"
             )
 
@@ -321,7 +463,9 @@ def main():
     args = parser.parse_args()
 
     if args.timeout <= 0:
-        parser.error("--timeout must be positive")
+        parser.error(
+            "--timeout must be positive"
+        )
 
     with open(
         args.event_json,
@@ -330,7 +474,9 @@ def main():
     ) as file:
         event = json.load(file)
 
-    asyncio.run(run(event, args.timeout))
+    asyncio.run(
+        run(event, args.timeout)
+    )
 
 
 if __name__ == "__main__":
