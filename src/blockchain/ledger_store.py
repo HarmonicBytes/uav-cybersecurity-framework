@@ -7,7 +7,7 @@ from pathlib import Path
 
 from block import Block, Blockchain
 from protocol import calculate_digest
-
+from commit_certificate import verify_commit_certificate
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -137,6 +137,7 @@ class SecurityLedgerStore:
         view,
         sequence,
         committed_validators,
+        commit_certificate=None,
     ):
         """
         Persist an alert only after the caller
@@ -175,6 +176,29 @@ class SecurityLedgerStore:
             raise ValueError(
                 "Invalid committed-validator list"
             )
+
+        # Verify the original signed COMMIT envelopes
+        # before storing a certificate-backed event.
+        if commit_certificate is not None:
+            verification = verify_commit_certificate(
+                alert=alert,
+                certificate=commit_certificate,
+                view=view,
+                sequence=sequence,
+            )
+
+            if verification["digest"] != committed_digest:
+                raise ValueError(
+                    "Certificate digest mismatch"
+                )
+
+            if set(verification["validators"]) != set(
+                committed_validators
+            ):
+                raise ValueError(
+                    "Certificate validators do not match "
+                    "recorded committed validators"
+                )
 
         blockchain = self.load()
 
@@ -226,6 +250,14 @@ class SecurityLedgerStore:
                 ),
             },
         }
+
+        # Store cryptographic evidence within the event
+        # itself, so it is covered by the block hash.
+        if commit_certificate is not None:
+            record["consensus"]["commit_certificate"] = (
+                commit_certificate
+            )
+            record["consensus"]["certificate_verified"] = True
 
         block = Block(
             index=previous.index + 1,

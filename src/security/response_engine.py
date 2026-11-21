@@ -159,6 +159,7 @@ class DefensiveResponseEngine:
         expected_digest,
         view,
         sequence,
+        require_certificate=False,
     ):
         """
         Verify a persisted alert and record a simulated
@@ -247,6 +248,39 @@ class DefensiveResponseEngine:
             raise ValueError(
                 "Invalid recorded validator metadata"
             )
+
+        # Certified records must carry independently
+        # verifiable signed COMMIT evidence.
+        certificate = consensus.get("commit_certificate")
+
+        if certificate is None:
+            if require_certificate:
+                raise ValueError(
+                    "Missing signed COMMIT certificate"
+                )
+        else:
+            from commit_certificate import (
+                verify_commit_certificate,
+            )
+
+            verification = verify_commit_certificate(
+                alert=alert,
+                certificate=certificate,
+                view=view,
+                sequence=sequence,
+            )
+
+            if verification["digest"] != expected_digest:
+                raise ValueError(
+                    "Certificate digest mismatch"
+                )
+
+            if set(verification["validators"]) != set(
+                validators
+            ):
+                raise ValueError(
+                    "Certificate validator mismatch"
+                )
 
         responses = self._load_responses()
 
