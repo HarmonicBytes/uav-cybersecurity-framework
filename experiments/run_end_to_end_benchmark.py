@@ -53,6 +53,10 @@ FIELDS = [
     "authentication_ms",
     "consensus_stage_ms",
     "ledger_ms",
+    "replication_ms",
+    "replicated_validators",
+    "replicated_block_index",
+    "replicated_block_hash",
     "response_ms",
     "total_pipeline_ms",
     "GCS_01_consensus_ms",
@@ -231,7 +235,21 @@ async def execute_trial(
             "ledger_ms": (
                 workflow["ledger_ms"]
             ),
+            "replication_ms": (
+                workflow["replication_ms"]
+            ),
 
+            "replicated_validators": (
+                workflow["replicated_validators"]
+            ),
+
+            "replicated_block_index": (
+                workflow["replicated_block_index"]
+            ),
+
+            "replicated_block_hash": (
+                workflow["replicated_block_hash"]
+            ),
             "response_ms": (
                 workflow["response_ms"]
             ),
